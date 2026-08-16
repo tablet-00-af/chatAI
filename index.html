@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>AIチャット Ver.3</title>
+<link rel="icon" href="favicon.ico">
+<style>
+body { font-family:sans-serif; display:flex; flex-direction:column; height:100vh; margin:0; background:#e5e5e5; }
+#chatArea { flex:1; overflow-y:auto; padding:15px; display:flex; flex-direction:column; gap:10px; }
+.bubble { max-width:60%; padding:10px 14px; border-radius:18px; word-wrap:break-word; }
+.me { align-self:flex-end; background:#9df18c; border-bottom-right-radius:0; }
+.ai { align-self:flex-start; background:#ffffff; border-bottom-left-radius:0; }
+#inputArea { display:flex; padding:10px; background:#fff; border-top:1px solid #ccc; align-items:flex-start; }
+#userInput { flex:1; padding:10px; font-size:16px; border:1px solid #ccc; border-radius:8px; }
+#sendBtn,#menuBtn { margin-left:10px; padding:10px 18px; font-size:16px; border:none; border-radius:8px; color:white; cursor:pointer; }
+#sendBtn { background:#4CAF50; } #sendBtn:hover { background:#45a049; }
+#menuBtn { background:#2196F3; } #menuBtn:hover { background:#1976D2; }
+#menuItems { display:none; position:absolute; bottom:100%; right:0; background:#fff; border:1px solid #ccc; border-radius:8px; flex-direction:column; padding:5px; z-index:10; }
+#menuItems button { margin:2px 0; padding:8px; border:none; border-radius:6px; color:white; cursor:pointer; }
+
+/* モーダル */
+.modalOverlay { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.4); z-index:1000; }
+.modalBox { background:#fff9cc; padding:20px; border-radius:12px; width:300px; max-width:80%; margin:0 auto; position:relative; top:30%; box-shadow:0 4px 12px rgba(0,0,0,0.3); text-align:center; }
+.modalBox input { width:100%; padding:8px; margin-top:10px; border-radius:6px; border:1px solid #ccc; }
+.modalBox button { margin-top:10px; padding:8px 14px; border:none; border-radius:6px; background:#4CAF50; color:white; cursor:pointer; }
+</style>
+</head>
+<body>
+
+<!-- 教えるモーダル -->
+<div id="teachOverlay" class="modalOverlay">
+  <div class="modalBox">
+    <div id="teachText">「○○」と聞かれたら何と答えればよいですか？</div>
+    <input id="teachInput" type="text" placeholder="答えを入力">
+    <button onclick="submitTeaching()">登録</button>
+  </div>
+</div>
+
+<!-- アップロードモード選択モーダル -->
+<div id="uploadModeOverlay" class="modalOverlay">
+  <div class="modalBox">
+    <div>アップロード方法を選んでください</div>
+    <button onclick="confirmUpload('add')">既存に追加</button>
+    <button onclick="confirmUpload('overwrite')">既存を上書き</button>
+  </div>
+</div>
+
+<!-- チャット欄 -->
+<div id="chatArea"></div>
+
+<!-- 入力欄 -->
+<div id="inputArea">
+  <input id="userInput" type="text" placeholder="メッセージを入力…">
+  <button id="sendBtn" onclick="sendMessage()">送信</button>
+  <div style="position:relative;">
+    <button id="menuBtn" onclick="toggleMenu()">メニュー ▲</button>
+    <div id="menuItems">
+      <button onclick="clearChat()" style="background:#f44336; color:white;">チャットクリア</button>
+      <button onclick="exportMemory()" style="background:#4CAF50; color:white;">記憶ダウンロード</button>
+      <button onclick="document.getElementById('uploadInput').click()" style="background:#2196F3; color:white;">記憶アップロード</button>
+      <button onclick="resetMemory()" style="background:#CC0000; color:white;">記憶リセット</button>
+    </div>
+  </div>
+  <input type="file" id="uploadInput" style="display:none" accept=".json" onchange="uploadMemory(event)">
+</div>
+
+<script>
+// 初期Markov連鎖データ
+let markovData = {
+  "こんにちは":["元気？","今日はいい天気だね","やあ"],
+  "元気？":["うん、元気だよ","まあまあかな","あなたは？"],
+  "今日は":["どんな予定ある？","天気がいいね","勉強する？"],
+  "うん":["そうだね","なるほど","いいね"],
+  "いいね":["うれしいな","楽しいね","もっと話そう"]
+};
+let keywordMemory = {};
+
+// localStorage読み込み
+const savedMarkov = JSON.parse(localStorage.getItem("markovLearned")||"{}");
+for(const k in savedMarkov) markovData[k]=savedMarkov[k];
+const savedKeyword = JSON.parse(localStorage.getItem("keywordMemory")||"{}");
+for(const k in savedKeyword) keywordMemory[k]=savedKeyword[k];
+
+let chatHistory = [];
+let uploadFile = null;
+let lastAI = null;
+
+// Markov返答
+function markovReplyWithContext(input){
+  const words=input.split(/[\s。、？!]/).filter(w=>w);
+  let candidates=[];
+  for(let i=chatHistory.length-1;i>=0;i--){
+    const lastWord=chatHistory[i].text.split(/[\s。、？!]/).pop();
+    if(markovData[lastWord]) candidates=candidates.concat(markovData[lastWord]);
+    if(candidates.length>=5) break;
+  }
+  const lastInputWord=words[words.length-1]||"";
+  if(markovData[lastInputWord]) candidates=candidates.concat(markovData[lastInputWord]);
+  if(candidates.length===0){ showTeachModal(input); return "……"; }
+  return candidates[Math.floor(Math.random()*candidates.length)];
+}
+
+// Markov学習
+function learnFromText(text){
+  const words=text.split(/[\s。、？!]/).filter(w=>w);
+  for(let i=0;i<words.length-1;i++){
+    const w=words[i], next=words[i+1];
+    if(!markovData[w]) markovData[w]=[];
+    if(!markovData[w].includes(next)) markovData[w].push(next);
+  }
+  localStorage.setItem("markovLearned", JSON.stringify(markovData));
+}
+
+// 初期化
+window.onload=()=>{
+  const saved=JSON.parse(localStorage.getItem("chatLog")||"[]");
+  for(const msg of saved){ addMessage(msg.type,msg.text); chatHistory.push({type:msg.type,text:msg.text}); }
+  scrollToBottom();
+};
+
+// イベント
+document.getElementById("userInput").addEventListener("keydown", e=>{ if(e.key==="Enter") sendMessage(); });
+document.getElementById("teachInput").addEventListener("keydown", e=>{ if(e.key==="Enter") submitTeaching(); });
+
+// メッセージ送信
+function sendMessage(){
+  const text = document.getElementById("userInput").value.trim();
+  if(!text) return;
+  document.getElementById("userInput").value = "";
+
+  addMessage("me", text); 
+  saveMessage("me", text); 
+  chatHistory.push({type:"me",text});
+  learnFromText(text);
+
+  if(lastAI) {
+    if(!markovData[lastAI]) markovData[lastAI] = [];
+    if(!markovData[lastAI].includes(text)) markovData[lastAI].push(text);
+    localStorage.setItem("markovLearned", JSON.stringify(markovData));
+  }
+
+  scrollToBottom();
+  const thinkingBubble = addMessage("ai","思考中…"); scrollToBottom();
+
+  setTimeout(()=>{
+    const aiText = markovReplyWithContext(text);
+    thinkingBubble.innerText = aiText;
+    if(aiText!=="……"){
+      saveMessage("ai", aiText); 
+      chatHistory.push({type:"ai",text:aiText}); 
+      learnFromText(aiText);
+      lastAI = aiText;
+    }
+    scrollToBottom();
+  },500);
+}
+
+// チャット操作
+function addMessage(type,text){ const chat=document.getElementById("chatArea"); const bubble=document.createElement("div"); bubble.className=`bubble ${type}`; bubble.innerText=text; chat.appendChild(bubble); return bubble; }
+function saveMessage(type,text){ const saved=JSON.parse(localStorage.getItem("chatLog")||"[]"); saved.push({type,text}); localStorage.setItem("chatLog",JSON.stringify(saved)); }
+function scrollToBottom(){ const chat=document.getElementById("chatArea").scrollTop=document.getElementById("chatArea").scrollHeight; }
+function clearChat(){ if(confirm("本当にチャットをクリアしますか？")){ localStorage.removeItem("chatLog"); chatHistory=[]; document.getElementById("chatArea").innerHTML=""; } }
+
+// 教えるモーダル
+function showTeachModal(q){ document.getElementById("teachText").innerText=`「${q}」と聞かれたら何と答えればよいですか？`; document.getElementById("teachOverlay").style.display="block"; document.getElementById("teachInput").focus(); }
+function hideTeachModal(){ document.getElementById("teachOverlay").style.display="none"; document.getElementById("teachInput").value=""; }
+function submitTeaching(){ 
+  const ans = document.getElementById("teachInput").value.trim(); 
+  if(!ans) return;
+  const q = document.getElementById("teachText").innerText.match(/「(.+)」/)[1];
+  if(!markovData[q]) markovData[q] = [];
+  if(!markovData[q].includes(ans)) markovData[q].push(ans);
+  localStorage.setItem("markovLearned", JSON.stringify(markovData));
+  addMessage("ai", ans); saveMessage("ai", ans);
+  hideTeachModal(); scrollToBottom();
+}
+
+// 記憶管理
+function exportMemory(){
+  const dataStr = JSON.stringify({markovData, keywordMemory}, null, 2);
+  const blob = new Blob([dataStr], {type:"application/json"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a"); a.href = url; a.download="memory.json"; a.click();
+  URL.revokeObjectURL(url);
+}
+
+// アップロード
+function uploadMemory(event){ uploadFile = event.target.files[0]; if(uploadFile) document.getElementById("uploadModeOverlay").style.display = "block"; }
+function confirmUpload(mode){
+  if(!uploadFile) return;
+  const reader = new FileReader();
+  reader.onload = function(e){
+    try{
+      const json = JSON.parse(e.target.result);
+      if(mode === "overwrite"){
+        markovData = json.markovData || {};
+        keywordMemory = json.keywordMemory || {};
+      } else { 
+        for(const k in json.markovData){
+          if(!markovData[k]) markovData[k]=[];
+          for(const v of json.markovData[k]) if(!markovData[k].includes(v)) markovData[k].push(v);
+        }
+        for(const k in json.keywordMemory){
+          if(!keywordMemory[k]) keywordMemory[k]=[];
+          for(const v of json.keywordMemory[k]) if(!keywordMemory[k].includes(v)) keywordMemory[k].push(v);
+        }
+      }
+      localStorage.setItem("markovLearned", JSON.stringify(markovData));
+      localStorage.setItem("keywordMemory", JSON.stringify(keywordMemory));
+      alert(mode==="overwrite"?"記憶を上書きしました！":"記憶を追加しました！");
+    } catch { alert("JSONの読み込みに失敗しました"); }
+  };
+  reader.readAsText(uploadFile);
+  uploadFile = null;
+  document.getElementById("uploadModeOverlay").style.display = "none";
+}
+
+// 記憶リセット
+function resetMemory(){ if(confirm("本当に記憶をリセットしますか？")){ markovData={}; keywordMemory={}; localStorage.removeItem("markovLearned"); localStorage.removeItem("keywordMemory"); alert("記憶をリセットしました"); } }
+
+// メニュー操作（上に展開）
+function toggleMenu(){
+  const menu = document.getElementById("menuItems");
+  menu.style.display = menu.style.display==="flex"?"none":"flex";
+  menu.style.flexDirection = "column";
+}
+
+// 記憶編集ボタン押した時（作りかけ）
+function openMemoryEditor(){
+  const url = window.location.href.split("?")[0] + "?editor=1";
+  window.open(url, "_blank");
+}
+
+// 記憶編集モード（作りかけ）
+window.addEventListener("DOMContentLoaded", () => {
+  const params = new URLSearchParams(location.search);
+  if(params.get("editor") === "1"){
+    openEditorMode();
+  }
+});
+
+function openEditorMode(){
+  document.body.innerHTML = `
+    <h2>AIチャット Ver.3　記憶（編集可能）</h2>
+    <textarea id="editor" style="width:100%; height:70vh; font-family:monospace;"></textarea>
+    <br>
+    <button onclick="saveMemory()">保存</button>
+  `;
+
+  const data = {
+    markovData: JSON.parse(localStorage.getItem("markovData") || "{}"),
+    keywordMemory: JSON.parse(localStorage.getItem("keywordMemory") || "{}")
+  };
+
+  document.getElementById("editor").value = JSON.stringify(data, null, 2);
+}
+
+function saveMemory(){
+  try{
+    const parsed = JSON.parse(document.getElementById("editor").value);
+    localStorage.setItem("markovData", JSON.stringify(parsed.markovData || {}));
+    localStorage.setItem("keywordMemory", JSON.stringify(parsed.keywordMemory || {}));
+    alert("保存しました。チャットのタブを再読み込みしてください。このタブは閉じます。");
+    window.close();
+  }catch(e){
+    alert("JSONの形式が正しくありません。");
+  }
+}
+
+</script>
+</body>
+</html>
